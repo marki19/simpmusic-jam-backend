@@ -56,6 +56,7 @@ wss.on('connection', (ws) => {
                 case 'CREATE_SESSION': {
                     currentUserId = msg.userId;
                     currentRoomId = generateRoomCode();
+                    console.log(`[Jam] Room created: ${currentRoomId} by Host: ${currentUserId}`);
                     
                     sessions.set(currentRoomId, {
                         hostId: currentUserId,
@@ -107,6 +108,7 @@ wss.on('connection', (ws) => {
                         type: 'GUEST_JOINED', 
                         userId 
                     }, ws);
+                    console.log(`[Jam] Guest joined: ${userId} in room: ${roomId}`);
                     break;
                 }
                 
@@ -154,6 +156,7 @@ wss.on('connection', (ws) => {
                     }
                     
                     // Relay the command to everyone else
+                    console.log(`[Jam] Room ${currentRoomId} | ${currentUserId} sent command: ${msg.command}`);
                     broadcast(currentRoomId, {
                         type: 'COMMAND',
                         command: msg.command,
@@ -185,15 +188,18 @@ wss.on('connection', (ws) => {
                 session.hostWs = newHostWs;
                 session.guests.delete(newHostId);
                 
+                console.log(`[Jam] Host ${currentUserId} left. Migrated host to ${newHostId} in room: ${currentRoomId}`);
                 broadcast(currentRoomId, { type: 'HOST_LEFT', userId: currentUserId });
             } else {
                 // No guests left, end session
+                console.log(`[Jam] Host ${currentUserId} left. Room ${currentRoomId} destroyed.`);
                 broadcast(currentRoomId, { type: 'SESSION_ENDED' });
                 sessions.delete(currentRoomId);
             }
         } else {
             // Guest left
             session.guests.delete(currentUserId);
+            console.log(`[Jam] Guest left: ${currentUserId} from room: ${currentRoomId}`);
             broadcast(currentRoomId, { type: 'GUEST_LEFT', userId: currentUserId });
         }
     });
