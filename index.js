@@ -47,7 +47,6 @@ function broadcast(roomId, message, excludeWs = null) {
 wss.on('connection', (ws) => {
     let currentRoomId = null;
     let currentUserId = null;
-    let isHost = false;
 
     ws.on('message', (messageRaw) => {
         try {
@@ -56,7 +55,6 @@ wss.on('connection', (ws) => {
             switch (msg.type) {
                 case 'CREATE_SESSION': {
                     currentUserId = msg.userId;
-                    isHost = true;
                     currentRoomId = generateRoomCode();
                     
                     sessions.set(currentRoomId, {
@@ -91,7 +89,6 @@ wss.on('connection', (ws) => {
                     
                     currentRoomId = roomId;
                     currentUserId = userId;
-                    isHost = false;
                     
                     const session = sessions.get(roomId);
                     session.guests.set(userId, ws);
@@ -100,6 +97,7 @@ wss.on('connection', (ws) => {
                     ws.send(JSON.stringify({
                         type: 'SESSION_JOINED',
                         roomId: currentRoomId,
+                        hostId: session.hostId, // Explicitly pass hostId
                         state: session.state,
                         permissions: session.permissions
                     }));
@@ -113,8 +111,10 @@ wss.on('connection', (ws) => {
                 }
                 
                 case 'UPDATE_PERMISSIONS': {
-                    if (!isHost || !currentRoomId) return;
+                    if (!currentRoomId) return;
                     const session = sessions.get(currentRoomId);
+                    if (session.hostId !== currentUserId) return;
+                    
                     session.permissions = { ...session.permissions, ...msg.permissions };
                     broadcast(currentRoomId, {
                         type: 'PERMISSIONS_UPDATED',
@@ -125,8 +125,11 @@ wss.on('connection', (ws) => {
                 
                 case 'SYNC_STATE': {
                     // Host periodically syncs the master state
-                    if (!isHost || !currentRoomId) return;
+                    if (!currentRoomId) return;
                     const session = sessions.get(currentRoomId);
+                    // Also allow sync if the guest was just promoted
+                    if (session.hostId !== currentUserId) return;
+                    
                     session.state = { ...session.state, ...msg.state };
                     broadcast(currentRoomId, {
                         type: 'STATE_SYNC',
@@ -138,6 +141,7 @@ wss.on('connection', (ws) => {
                 case 'COMMAND': {
                     if (!currentRoomId) return;
                     const session = sessions.get(currentRoomId);
+                    const isHost = session.hostId === currentUserId;
                     
                     // Check permissions if guest
                     if (!isHost) {
@@ -169,10 +173,24 @@ wss.on('connection', (ws) => {
         const session = sessions.get(currentRoomId);
         if (!session) return;
         
+        const isHost = session.hostId === currentUserId;
+        
         if (isHost) {
-            // Host left, end session
-            broadcast(currentRoomId, { type: 'SESSION_ENDED' }, ws);
-            sessions.delete(currentRoomId);
+            if (session.guests.size > 0) {
+                // Host migration: Pick the oldest guest
+                const newHostId = Array.from(session.guests.keys())[0];
+                const newHostWs = session.guests.get(newHostId);
+                
+                session.hostId = newHostId;
+                session.hostWs = newHostWs;
+                session.guests.delete(newHostId);
+                
+                broadcast(currentRoomId, { type: 'HOST_LEFT', userId: currentUserId });
+            } else {
+                // No guests left, end session
+                broadcast(currentRoomId, { type: 'SESSION_ENDED' });
+                sessions.delete(currentRoomId);
+            }
         } else {
             // Guest left
             session.guests.delete(currentUserId);
