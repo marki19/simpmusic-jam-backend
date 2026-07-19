@@ -15,8 +15,7 @@ const wss = new WebSocket.Server({ server });
  * Room structure:
  * {
  *   hostId: string,
- *   hostWs: WebSocket,
- *   guests: Map<userId, { ws, displayName, online, lastSeen }>,
+ *   users: Map<userId, { ws, name, imageUrl, online, lastSeen }>,
  *   permissions: JamPermissions,
  *   state: JamPlaybackState,
  *   queue: JamQueueItem[],
@@ -46,12 +45,9 @@ function broadcast(roomId, message, excludeWs = null) {
     const session = sessions.get(roomId);
     if (!session) return;
     const data = JSON.stringify(message);
-    if (session.hostWs !== excludeWs && session.hostWs?.readyState === WebSocket.OPEN) {
-        session.hostWs.send(data);
-    }
-    for (const [, g] of session.guests) {
-        if (g.ws !== excludeWs && g.ws?.readyState === WebSocket.OPEN) {
-            g.ws.send(data);
+    for (const [, u] of session.users) {
+        if (u.ws !== excludeWs && u.ws?.readyState === WebSocket.OPEN) {
+            u.ws.send(data);
         }
     }
 }
@@ -149,6 +145,19 @@ function fullQueuePayload(session) {
     return [...session.queue, ...session.recommendations];
 }
 
+function getParticipantsList(session) {
+    const list = [];
+    for (const [userId, u] of session.users) {
+        list.push({
+            userId,
+            name: u.name,
+            imageUrl: u.imageUrl,
+            online: u.online
+        });
+    }
+    return list;
+}
+
 // ─── WebSocket Handler ───────────────────────────────────────────────────────
 
 wss.on('connection', (ws) => {
@@ -166,10 +175,18 @@ wss.on('connection', (ws) => {
                     currentRoomId = generateRoomCode();
                     console.log(`[Jam] Room ${currentRoomId} created by ${currentUserId}`);
 
+                    const usersMap = new Map();
+                    usersMap.set(currentUserId, {
+                        ws,
+                        name: msg.name || 'Host',
+                        imageUrl: msg.imageUrl || '',
+                        online: true,
+                        lastSeen: Date.now()
+                    });
+
                     sessions.set(currentRoomId, {
                         hostId: currentUserId,
-                        hostWs: ws,
-                        guests: new Map(),
+                        users: usersMap,
                         permissions: {
                             allowAddSongs: true,
                             allowRemoveSongs: true,
@@ -201,7 +218,7 @@ wss.on('connection', (ws) => {
 
                 // ── JOIN_SESSION ────────────────────────────────────────────
                 case 'JOIN_SESSION': {
-                    const { roomId, userId } = msg;
+                    const { roomId, userId, name, imageUrl } = msg;
                     if (!sessions.has(roomId)) {
                         sendTo(ws, { type: 'ERROR', message: 'Room not found' });
                         return;
@@ -218,19 +235,33 @@ wss.on('connection', (ws) => {
                         console.log(`[Jam] ${userId} reconnected to ${roomId}`);
                     }
 
-                    session.guests.set(userId, { ws, online: true, lastSeen: Date.now() });
+                    session.users.set(userId, { 
+                        ws, 
+                        name: name || 'Guest', 
+                        imageUrl: imageUrl || '', 
+                        online: true, 
+                        lastSeen: Date.now() 
+                    });
 
                     sendTo(ws, {
                         type: 'SESSION_JOINED',
                         roomId,
-                        hostId: session.hostId,
-                        state: session.state,
-                        permissions: session.permissions,
-                        queue: fullQueuePayload(session),
-                        recommendationsEnabled: session.recommendationsEnabled,
+                        payload: {
+                            hostId: session.hostId,
+                            state: session.state,
+                            permissions: session.permissions,
+                            queue: fullQueuePayload(session),
+                            recommendationsEnabled: session.recommendationsEnabled,
+                            participants: getParticipantsList(session),
+                        }
                     });
 
-                    broadcast(roomId, { type: 'GUEST_JOINED', userId, online: true }, ws);
+                    broadcast(roomId, { 
+                        type: 'PARTICIPANTS_UPDATED', 
+                        payload: {
+                            participants: getParticipantsList(session) 
+                        }
+                    });
                     console.log(`[Jam] ${userId} joined room ${roomId}`);
                     break;
                 }
@@ -241,8 +272,8 @@ wss.on('connection', (ws) => {
                     const session = sessions.get(currentRoomId);
                     if (!session || session.hostId !== currentUserId) return;
 
-                    session.permissions = { ...session.permissions, ...msg.permissions };
-                    broadcast(currentRoomId, { type: 'PERMISSIONS_UPDATED', permissions: session.permissions });
+                    session.permissions = { ...session.permissions, ...msg.payload?.permissions };
+                    broadcast(currentRoomId, { type: 'PERMISSIONS_UPDATED', payload: { permissions: session.permissions } });
                     break;
                 }
 
@@ -254,12 +285,12 @@ wss.on('connection', (ws) => {
 
                     session.state = {
                         ...session.state,
-                        ...msg.state,
+                        ...msg.payload?.state,
                         serverTimestampMs: Date.now(),
                     };
                     broadcast(currentRoomId, {
                         type: 'STATE_SYNC',
-                        state: session.state,
+                        payload: { state: session.state },
                     }, ws);
                     break;
                 }
@@ -324,12 +355,19 @@ wss.on('connection', (ws) => {
                                 );
                             }
 
-                            broadcast(currentRoomId, {
+                                                        broadcast(currentRoomId, {
                                 type: 'QUEUE_UPDATED',
-                                queue: fullQueuePayload(session),
-                                reason: 'SONG_ADDED',
-                                queueId: newItem.queueId,
-                                addedBy: currentUserId,
+                                payload: {
+                                    queue: fullQueuePayload(session),
+                                    reason: 'SONG_ADDED',
+                                    queueId: newItem.queueId,
+                                    videoId: newItem.videoId,
+                                    title: newItem.title,
+                                    artist: newItem.artist,
+                                    thumbnailUrl: newItem.thumbnailUrl,
+                                    durationMs: newItem.durationMs,
+                                    addedBy: currentUserId,
+                                }
                             });
                             break;
                         }
@@ -351,9 +389,11 @@ wss.on('connection', (ws) => {
 
                             broadcast(currentRoomId, {
                                 type: 'QUEUE_UPDATED',
-                                queue: fullQueuePayload(session),
-                                reason: 'SONG_REMOVED',
-                                queueId,
+                                payload: {
+                                    queue: fullQueuePayload(session),
+                                    reason: 'SONG_REMOVED',
+                                    queueId,
+                                }
                             });
                             break;
                         }
@@ -374,10 +414,12 @@ wss.on('connection', (ws) => {
 
                             broadcast(currentRoomId, {
                                 type: 'QUEUE_UPDATED',
-                                queue: fullQueuePayload(session),
-                                reason: 'SONG_MOVED',
-                                queueId,
-                                toIndex: clampedTo,
+                                payload: {
+                                    queue: fullQueuePayload(session),
+                                    reason: 'SONG_MOVED',
+                                    queueId,
+                                    toIndex: clampedTo,
+                                }
                             });
                             break;
                         }
@@ -397,9 +439,11 @@ wss.on('connection', (ws) => {
 
                             broadcast(currentRoomId, {
                                 type: 'VOTE_UPDATED',
-                                queueId,
-                                voteCount: voters.size,
-                                voterIds: [...voters],
+                                payload: {
+                                    queueId,
+                                    voteCount: voters.size,
+                                    voterIds: [...voters],
+                                }
                             });
                             break;
                         }
@@ -414,8 +458,24 @@ wss.on('connection', (ws) => {
                             }
                             broadcast(currentRoomId, {
                                 type: 'RECOMMENDATIONS_UPDATED',
-                                enabled,
-                                recommendations: session.recommendations,
+                                payload: {
+                                    enabled,
+                                    recommendations: session.recommendations,
+                                }
+                            });
+                            break;
+                        }
+
+                        case 'UPDATE_PERMISSIONS': {
+                            if (!isHost) break;
+                            if (msg.payload) {
+                                session.permissions = { ...session.permissions, ...msg.payload };
+                            }
+                            broadcast(currentRoomId, {
+                                type: 'PERMISSIONS_UPDATED',
+                                payload: {
+                                    permissions: session.permissions
+                                }
                             });
                             break;
                         }
@@ -425,8 +485,10 @@ wss.on('connection', (ws) => {
                             session.recommendations = buildRecommendations(session.tastes, session.queue);
                             broadcast(currentRoomId, {
                                 type: 'RECOMMENDATIONS_UPDATED',
-                                enabled: session.recommendationsEnabled,
-                                recommendations: session.recommendations,
+                                payload: {
+                                    enabled: session.recommendationsEnabled,
+                                    recommendations: session.recommendations,
+                                }
                             });
                             break;
                         }
@@ -438,8 +500,10 @@ wss.on('connection', (ws) => {
                                 session.recommendations = buildRecommendations(session.tastes, session.queue);
                                 broadcast(currentRoomId, {
                                     type: 'RECOMMENDATIONS_UPDATED',
-                                    enabled: true,
-                                    recommendations: session.recommendations,
+                                    payload: {
+                                        enabled: true,
+                                        recommendations: session.recommendations,
+                                    }
                                 });
                             }
                             // Relay taste to others for display
@@ -460,7 +524,7 @@ wss.on('connection', (ws) => {
                                 command: msg.command,
                                 payload: msg.payload,
                                 userId: currentUserId,
-                            }, ws);
+                            });
                         }
                     }
                     break;
@@ -481,20 +545,33 @@ wss.on('connection', (ws) => {
         const GRACE_PERIOD_MS = 30_000; // 30-second reconnect window
 
         if (isHost) {
-            if (session.guests.size > 0) {
+            // Find next host among guests (online ones first)
+            const otherUsers = [...session.users.entries()].filter(([id]) => id !== currentUserId);
+            if (otherUsers.length > 0) {
                 // Grace period: wait 30 s before migrating host
                 const timer = setTimeout(() => {
                     const s = sessions.get(currentRoomId);
                     if (!s || s.hostId !== currentUserId) return; // already reconnected or migrated
-                    const [newHostId, newHostGuest] = [...s.guests.entries()][0];
+                    
+                    const availableUsers = [...s.users.entries()].filter(([id]) => id !== currentUserId);
+                    if (availableUsers.length === 0) return;
+                    
+                    const [newHostId] = availableUsers[0];
                     s.hostId = newHostId;
-                    s.hostWs = newHostGuest.ws;
-                    s.guests.delete(newHostId);
                     console.log(`[Jam] Host ${currentUserId} left. Promoted ${newHostId} in ${currentRoomId}`);
                     broadcast(currentRoomId, { type: 'HOST_TRANSFERRED', newHostId, oldHostId: currentUserId });
                 }, GRACE_PERIOD_MS);
                 session.disconnectTimers.set(currentUserId, timer);
-                broadcast(currentRoomId, { type: 'HOST_DISCONNECTED', userId: currentUserId });
+                
+                                if (session.users.has(currentUserId)) {
+                    session.users.get(currentUserId).online = false;
+                }
+                broadcast(currentRoomId, { 
+                    type: 'PARTICIPANTS_UPDATED', 
+                    payload: {
+                        participants: getParticipantsList(session) 
+                    }
+                });
             } else {
                 console.log(`[Jam] Host ${currentUserId} left. Room ${currentRoomId} destroyed.`);
                 broadcast(currentRoomId, { type: 'SESSION_ENDED' });
@@ -502,18 +579,28 @@ wss.on('connection', (ws) => {
             }
         } else {
             // Guest: mark offline, give them 30 s to reconnect
-            if (session.guests.has(currentUserId)) {
-                session.guests.get(currentUserId).online = false;
-                session.guests.get(currentUserId).lastSeen = Date.now();
+                        if (session.users.has(currentUserId)) {
+                session.users.get(currentUserId).online = false;
+                session.users.get(currentUserId).lastSeen = Date.now();
             }
-            broadcast(currentRoomId, { type: 'GUEST_DISCONNECTED', userId: currentUserId }, ws);
+            broadcast(currentRoomId, { 
+                type: 'PARTICIPANTS_UPDATED', 
+                payload: {
+                    participants: getParticipantsList(session) 
+                }
+            });
 
-            const timer = setTimeout(() => {
+                        const timer = setTimeout(() => {
                 const s = sessions.get(currentRoomId);
                 if (!s) return;
-                s.guests.delete(currentUserId);
+                s.users.delete(currentUserId);
                 s.disconnectTimers.delete(currentUserId);
-                broadcast(currentRoomId, { type: 'GUEST_LEFT', userId: currentUserId });
+                broadcast(currentRoomId, { 
+                    type: 'PARTICIPANTS_UPDATED', 
+                    payload: {
+                        participants: getParticipantsList(s) 
+                    }
+                });
                 console.log(`[Jam] ${currentUserId} fully left room ${currentRoomId}`);
             }, GRACE_PERIOD_MS);
             session.disconnectTimers.set(currentUserId, timer);
