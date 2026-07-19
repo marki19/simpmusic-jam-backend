@@ -665,7 +665,7 @@ setInterval(() => {
                         }
                     });
                     
-                    // Update activity so we don't spam it continuously
+                    // Update activity so we don't spam it continuously.
                     session.lastActivityTimestamp = now;
                 }
             }
