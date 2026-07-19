@@ -124,11 +124,15 @@ function buildRecommendations(tastes, existingQueue) {
     const seen = new Set(existingIds);
     for (let i = 0; i < maxLen; i++) {
         for (const [userId, tracks] of lists) {
-            if (i < tracks.length && !seen.has(tracks[i])) {
-                seen.add(tracks[i]);
+            if (i < tracks.length && !seen.has(tracks[i].videoId)) {
+                seen.add(tracks[i].videoId);
                 merged.push({
                     queueId: uuidv4(),
-                    videoId: tracks[i],
+                    videoId: tracks[i].videoId,
+                    title: tracks[i].title,
+                    artist: tracks[i].artist,
+                    thumbnailUrl: tracks[i].thumbnailUrl,
+                    durationMs: tracks[i].durationMs,
                     addedBy: userId,
                     isRecommendation: true,
                     addedTimestamp: Date.now(),
@@ -206,10 +210,11 @@ wss.on('connection', (ws) => {
                         },
                         queue: [],
                         votes: new Map(),
-                        recommendationsEnabled: true,
+                        recommendationsEnabled: false,
                         recommendations: [],
                         tastes: new Map(),
                         disconnectTimers: new Map(),
+                        lastActivityTimestamp: Date.now(),
                     });
 
                     sendTo(ws, { type: 'SESSION_CREATED', roomId: currentRoomId });
@@ -243,6 +248,7 @@ wss.on('connection', (ws) => {
                         lastSeen: Date.now() 
                     });
 
+                    session.lastActivityTimestamp = Date.now();
                     sendTo(ws, {
                         type: 'SESSION_JOINED',
                         roomId,
@@ -272,6 +278,7 @@ wss.on('connection', (ws) => {
                     const session = sessions.get(currentRoomId);
                     if (!session || session.hostId !== currentUserId) return;
 
+                    session.lastActivityTimestamp = Date.now();
                     session.permissions = { ...session.permissions, ...msg.payload?.permissions };
                     broadcast(currentRoomId, { type: 'PERMISSIONS_UPDATED', payload: { permissions: session.permissions } });
                     break;
@@ -283,6 +290,7 @@ wss.on('connection', (ws) => {
                     const session = sessions.get(currentRoomId);
                     if (!session || session.hostId !== currentUserId) return;
 
+                    session.lastActivityTimestamp = Date.now();
                     session.state = {
                         ...session.state,
                         ...msg.payload?.state,
@@ -301,6 +309,8 @@ wss.on('connection', (ws) => {
                     const session = sessions.get(currentRoomId);
                     if (!session) return;
                     const isHost = session.hostId === currentUserId;
+
+                    session.lastActivityTimestamp = Date.now();
                     const perms = session.permissions;
 
                     // ── Permission guards ────────────────────────────────────
@@ -355,7 +365,7 @@ wss.on('connection', (ws) => {
                                 );
                             }
 
-                                                        broadcast(currentRoomId, {
+                            broadcast(currentRoomId, {
                                 type: 'QUEUE_UPDATED',
                                 payload: {
                                     queue: fullQueuePayload(session),
@@ -468,7 +478,9 @@ wss.on('connection', (ws) => {
 
                         case 'UPDATE_PERMISSIONS': {
                             if (!isHost) break;
-                            if (msg.payload) {
+                            if (msg.payload && msg.payload.permissions) {
+                                session.permissions = { ...session.permissions, ...msg.payload.permissions };
+                            } else if (msg.payload) {
                                 session.permissions = { ...session.permissions, ...msg.payload };
                             }
                             broadcast(currentRoomId, {
@@ -603,10 +615,63 @@ wss.on('connection', (ws) => {
                 });
                 console.log(`[Jam] ${currentUserId} fully left room ${currentRoomId}`);
             }, GRACE_PERIOD_MS);
-            session.disconnectTimers.set(currentUserId, timer);
+                            session.disconnectTimers.set(currentUserId, timer);
         }
     });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Clean up inactive sessions & auto-play
+setInterval(() => {
+    const now = Date.now();
+    for (const [roomId, session] of sessions.entries()) {
+        const inactiveMs = now - (session.lastActivityTimestamp || now);
+        
+        // 1.5 hours: end session
+        if (inactiveMs > 90 * 60 * 1000) {
+            console.log(`[Jam] Room ${roomId} inactive for 1.5h, ending session.`);
+            broadcast(roomId, { type: 'SESSION_ENDED' });
+            sessions.delete(roomId);
+            continue;
+        }
+        
+        // 1 hour: queue auto-play
+        if (inactiveMs > 60 * 60 * 1000 && session.recommendationsEnabled && session.recommendations.length > 0) {
+            // Check if queue is empty or current song is the last one
+            const currentIdx = session.queue.findIndex(i => i.videoId === session.state?.currentSongId);
+            if (currentIdx === -1 || currentIdx >= session.queue.length - 1) {
+                // Pop a recommendation and add to queue
+                const rec = session.recommendations.shift();
+                if (rec) {
+                    console.log(`[Jam] Room ${roomId} inactive for 1h, auto-playing recommendation ${rec.videoId}`);
+                    rec.isRecommendation = false; // Convert to manual
+                    rec.queueId = uuidv4();
+                    const pos = fairInsertPosition(session.queue, 'AUTO');
+                    session.queue.splice(pos, 0, rec);
+                    
+                    broadcast(roomId, {
+                        type: 'QUEUE_UPDATED',
+                        payload: {
+                            queue: fullQueuePayload(session),
+                            reason: 'SONG_ADDED',
+                            queueId: rec.queueId,
+                            videoId: rec.videoId,
+                            title: rec.title,
+                            artist: rec.artist,
+                            thumbnailUrl: rec.thumbnailUrl,
+                            durationMs: rec.durationMs,
+                            addedBy: 'AUTO',
+                        }
+                    });
+                    
+                    // Update activity so we don't spam it continuously
+                    session.lastActivityTimestamp = now;
+                }
+            }
+        }
+    }
+}, 60 * 1000); // Check every minute
 
 // ─── REST ────────────────────────────────────────────────────────────────────
 
