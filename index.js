@@ -628,13 +628,7 @@ setInterval(() => {
     for (const [roomId, session] of sessions.entries()) {
         const inactiveMs = now - (session.lastActivityTimestamp || now);
         
-        // 1.5 hours: end session
-        if (inactiveMs > 90 * 60 * 1000) {
-            console.log(`[Jam] Room ${roomId} inactive for 1.5h, ending session.`);
-            broadcast(roomId, { type: 'SESSION_ENDED' });
-            sessions.delete(roomId);
-            continue;
-        }
+        // (Session termination removed because user only expects 3 people total)
         
         // 1 hour: queue auto-play
         if (inactiveMs > 60 * 60 * 1000 && session.recommendationsEnabled && session.recommendations.length > 0) {
