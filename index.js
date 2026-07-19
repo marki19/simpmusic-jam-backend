@@ -665,8 +665,8 @@ setInterval(() => {
                         }
                     });
                     
-                    // Update activity so we don't spam it continuously.
-                    session.lastActivityTimestamp = now;
+                    // Do NOT update session.lastActivityTimestamp here!
+                    // We want the 1.5h timer to continue running down based on human inactivity.
                 }
             }
         }
